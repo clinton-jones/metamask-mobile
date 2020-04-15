@@ -33,8 +33,10 @@ import { fetchBasicGasEstimates, convertApiValueToGWEI } from '../../../../util/
 import Engine from '../../../../core/Engine';
 import Logger from '../../../../util/Logger';
 import ActionModal from '../../../UI/ActionModal';
+import AccountList from '../../../UI/AccountList';
 import CustomGas from '../CustomGas';
 import ErrorMessage from '../ErrorMessage';
+import { doENSReverseLookup } from '../../../../util/ENSUtils';
 import TransactionsNotificationManager from '../../../../core/TransactionsNotificationManager';
 import { strings } from '../../../../../locales/i18n';
 import collectiblesTransferInformation from '../../../../util/collectibles-transfer';
@@ -137,6 +139,10 @@ const styles = StyleSheet.create({
 		fontSize: 14,
 		alignSelf: 'center'
 	},
+	transactionEditText: {
+		fontSize: 12,
+		marginLeft: 8
+	},
 	actionsWrapper: {
 		margin: 24
 	},
@@ -213,6 +219,14 @@ const styles = StyleSheet.create({
 	},
 	hexDataText: {
 		textAlign: 'justify'
+	},
+	bottomModal: {
+		justifyContent: 'flex-end',
+		margin: 0
+	},
+	transactionFeeLeft: {
+		display: 'flex',
+		flexDirection: 'row'
 	}
 });
 
@@ -266,7 +280,15 @@ class Confirm extends PureComponent {
 		/**
 		 * Indicates whether hex data should be shown in transaction editor
 		 */
-		showHexData: PropTypes.bool
+		showHexData: PropTypes.bool,
+		/**
+		 * List of accounts from the PreferencesController
+		 */
+		identities: PropTypes.object,
+		/**
+		 * List of keyrings
+		 */
+		keyrings: PropTypes.array
 	};
 
 	state = {
@@ -277,6 +299,8 @@ class Confirm extends PureComponent {
 		customGas: undefined,
 		customGasPrice: undefined,
 		fromAccountBalance: undefined,
+		fromAccountName: this.props.transactionState.transactionFromName,
+		fromSelectedAddress: this.props.transactionState.transaction.from,
 		hexDataModalVisible: false,
 		gasError: undefined,
 		transactionValue: undefined,
@@ -284,7 +308,8 @@ class Confirm extends PureComponent {
 		transactionFee: undefined,
 		transactionTotalAmount: undefined,
 		transactionTotalAmountFiat: undefined,
-		errorMessage: undefined
+		errorMessage: undefined,
+		fromAccountModalVisible: false
 	};
 
 	componentDidMount = async () => {
@@ -525,8 +550,10 @@ class Confirm extends PureComponent {
 		const {
 			transactionState: { transaction }
 		} = this.props;
+		const { fromSelectedAddress } = this.state;
 		transaction.gas = BNToHex(transaction.gas);
 		transaction.gasPrice = BNToHex(transaction.gasPrice);
+		transaction.from = fromSelectedAddress;
 		return transaction;
 	};
 
@@ -596,17 +623,81 @@ class Confirm extends PureComponent {
 		);
 	};
 
-	render = () => {
+	getBalanceError = balance => {
 		const {
-			transaction: { from },
-			transactionToName,
-			transactionFromName,
-			selectedAsset
-		} = this.props.transactionState;
+			transactionState: {
+				transaction: { value = '0x0', gas = '0x0', gasPrice = '0x0' }
+			}
+		} = this.props;
+
+		const gasBN = hexToBN(gas);
+		const weiTransactionFee = gasBN.mul(gasPrice);
+		const valueBN = hexToBN(value);
+		const transactionTotalAmountBN = weiTransactionFee.add(valueBN);
+
+		const balanceIsInsufficient = hexToBN(balance).lt(transactionTotalAmountBN);
+
+		return balanceIsInsufficient ? strings('transaction.insufficient') : null;
+	};
+
+	onAccountChange = async accountAddress => {
+		const { identities, ticker, accounts } = this.props;
+		const { name } = identities[accountAddress];
+		const { PreferencesController } = Engine.context;
+		const fromAccountBalance = `${renderFromWei(accounts[accountAddress].balance)} ${getTicker(ticker)}`;
+		const ens = await doENSReverseLookup(accountAddress);
+		const fromAccountName = ens || name;
+		PreferencesController.setSelectedAddress(accountAddress);
+		// If new account doesn't have the asset
+		this.setState({
+			fromAccountName,
+			fromAccountBalance,
+			fromSelectedAddress: accountAddress,
+			balanceIsZero: hexToBN(accounts[accountAddress].balance).isZero()
+		});
+		this.toggleFromAccountModal();
+	};
+
+	toggleFromAccountModal = () => {
+		const { fromAccountModalVisible } = this.state;
+		this.setState({ fromAccountModalVisible: !fromAccountModalVisible });
+	};
+
+	renderFromAccountModal = () => {
+		const { identities, keyrings, ticker } = this.props;
+		const { fromAccountModalVisible, fromSelectedAddress } = this.state;
+
+		return (
+			<Modal
+				isVisible={fromAccountModalVisible}
+				style={styles.bottomModal}
+				onBackdropPress={this.toggleFromAccountModal}
+				onBackButtonPress={this.toggleFromAccountModal}
+				onSwipeComplete={this.toggleFromAccountModal}
+				swipeDirection={'down'}
+				propagateSwipe
+			>
+				<AccountList
+					enableAccountsAddition={false}
+					identities={identities}
+					selectedAddress={fromSelectedAddress}
+					keyrings={keyrings}
+					onAccountChange={this.onAccountChange}
+					getBalanceError={this.getBalanceError}
+					ticker={ticker}
+				/>
+			</Modal>
+		);
+	};
+
+	render = () => {
+		const { transactionToName, selectedAsset } = this.props.transactionState;
 		const { showHexData } = this.props;
 		const {
 			gasEstimationReady,
 			fromAccountBalance,
+			fromAccountName,
+			fromSelectedAddress,
 			transactionValue,
 			transactionValueFiat,
 			transactionFeeFiat,
@@ -621,8 +712,8 @@ class Confirm extends PureComponent {
 				<View style={styles.inputWrapper}>
 					<AddressFrom
 						onPressIcon={this.toggleFromAccountModal}
-						fromAccountAddress={from}
-						fromAccountName={transactionFromName}
+						fromAccountAddress={fromSelectedAddress}
+						fromAccountName={fromAccountName}
 						fromAccountBalance={fromAccountBalance}
 					/>
 					<AddressTo
@@ -665,7 +756,18 @@ class Confirm extends PureComponent {
 							<Text style={[styles.textSummary, styles.textSummaryAmount]}>{transactionValueFiat}</Text>
 						</View>
 						<View style={styles.summaryRow}>
-							<Text style={styles.textSummary}>{strings('transaction.transaction_fee')}</Text>
+							<View style={styles.transactionFeeLeft}>
+								<Text style={styles.textSummary}>{strings('transaction.transaction_fee')}</Text>
+								<TouchableOpacity
+									disabled={!gasEstimationReady}
+									onPress={this.toggleCustomGasModal}
+									key="transactionFeeEdit"
+								>
+									<Text style={[styles.actionText, styles.transactionEditText]}>
+										{strings('transaction.edit')}
+									</Text>
+								</TouchableOpacity>
+							</View>
 							{this.renderIfGastEstimationReady(
 								<Text style={[styles.textSummary, styles.textSummaryAmount]}>{transactionFeeFiat}</Text>
 							)}
@@ -693,13 +795,6 @@ class Confirm extends PureComponent {
 						</View>
 					)}
 					<View style={styles.actionsWrapper}>
-						<TouchableOpacity
-							style={styles.actionTouchable}
-							disabled={!gasEstimationReady}
-							onPress={this.toggleCustomGasModal}
-						>
-							<Text style={styles.actionText}>{strings('transaction.adjust_transaction_fee')}</Text>
-						</TouchableOpacity>
 						{showHexData && (
 							<TouchableOpacity style={styles.actionTouchable} onPress={this.toggleHexDataModal}>
 								<Text style={styles.actionText}>{strings('transaction.hex_data')}</Text>
@@ -718,6 +813,7 @@ class Confirm extends PureComponent {
 						{transactionConfirmed ? <ActivityIndicator size="small" color="white" /> : 'Send'}
 					</StyledButton>
 				</View>
+				{this.renderFromAccountModal()}
 				{this.renderCustomGasModal()}
 				{this.renderHexDataModal()}
 			</SafeAreaView>
@@ -734,7 +830,9 @@ const mapStateToProps = state => ({
 	network: state.engine.backgroundState.NetworkController.network,
 	showHexData: state.settings.showHexData,
 	ticker: state.engine.backgroundState.NetworkController.provider.ticker,
-	transactionState: state.newTransaction
+	transactionState: state.newTransaction,
+	identities: state.engine.backgroundState.PreferencesController.identities,
+	keyrings: state.engine.backgroundState.KeyringController.keyrings
 });
 
 const mapDispatchToProps = dispatch => ({
